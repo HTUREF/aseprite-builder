@@ -46,6 +46,15 @@ jobs:
         shell: pwsh
         run: ./scripts/preflight.ps1
 
+      # ------------------------------------------------------------------ 02b
+      - name: "02b Validate output credentials (fail fast, before compiling)"
+        if: ${{ inputs.publish }}
+        shell: pwsh
+        env:
+          PRIVATE_OUTPUT_TOKEN: ${{ secrets.PRIVATE_OUTPUT_TOKEN }}
+          PRIVATE_OUTPUT_REPO: ${{ secrets.PRIVATE_OUTPUT_REPO }}
+        run: ./scripts/check-output-credentials.ps1
+
       # ------------------------------------------------------------------ 03
       - name: "03 Reclaim disk only if free space is low"
         shell: pwsh

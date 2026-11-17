@@ -9,9 +9,21 @@ try {
         throw "Source pin mismatch: checked out $head but the workflow pins $env:ASEPRITE_SHA"
     }
 
+    # Make sure the tag object exists locally: src/ver/CMakeLists.txt derives the
+    # application version with 'git describe --tags', so a shallow checkout without
+    # the tag would make the binary report "1.x-<sha>-dev" instead of 1.3.18.6.
+    & git fetch --depth=1 --force origin ("refs/tags/" + $env:ASEPRITE_TAG + ":refs/tags/" + $env:ASEPRITE_TAG) 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: could not fetch tag $env:ASEPRITE_TAG." }
+
     $tagSha = (git rev-list -n 1 ("refs/tags/" + $env:ASEPRITE_TAG)).Trim()
     Write-Host ("Tag {0} resolves to {1}" -f $env:ASEPRITE_TAG, $tagSha)
     if ($tagSha -ne $env:ASEPRITE_SHA) { throw "Tag $env:ASEPRITE_TAG does not point at the pinned commit." }
+
+    $describe = (& git describe --tags --always --dirty 2>&1 | Out-String).Trim()
+    Write-Host "git describe: $describe"
+    if ($describe -notmatch '1\.3\.18\.6') {
+        Write-Host "WARNING: git describe does not mention the release tag; the compiled version string may contain a commit id."
+    }
 
     Write-Host ""
     Write-Host "=== Submodule status ==="
@@ -39,3 +51,4 @@ try {
 } finally { Pop-Location }
 
 Add-Content -Path $env:GITHUB_ENV -Value "SUBMODULE_COUNT=$subCount"
+Add-Content -Path $env:GITHUB_ENV -Value ("GIT_DESCRIBE=" + $describe)

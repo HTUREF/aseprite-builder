@@ -1,5 +1,8 @@
-# 10 Packages every runtime file (never only the exe), then writes
-#    aseprite-windows-x64.zip, SHA256SUMS.txt, build-manifest.json, build-notes.md
+# 10 Packages the real runtime file set: aseprite.exe + the whole build/bin/data tree.
+#    Aseprite does NOT embed data/ into the exe - src/CMakeLists.txt copies the data
+#    tree to build/bin/data through the copy_data target, and src/app/resource_finder.cpp
+#    loads fonts/, extensions/aseprite-theme/ etc. from <exe dir>/data at runtime.
+#    Shipping only the exe produces a binary that cannot show its UI.
 $ErrorActionPreference = 'Stop'
 $t0 = Get-Date
 Set-Location $env:GITHUB_WORKSPACE
@@ -8,59 +11,65 @@ $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
 if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
 New-Item -ItemType Directory -Path $dist -Force | Out-Null
 
-# --- collect runtime files --------------------------------------------------
-$binDir = Join-Path $env:GITHUB_WORKSPACE 'build/bin'
-if (-not (Test-Path $binDir)) { throw "build/bin not found" }
-
-# Never ship intermediate build output.
-$excludeExts = @('.pdb','.ilk','.exp','.lib','.obj','.iobj','.ipdb','.idb','.res','.tlog','.log','.a','.o','.map','.cache','.ninja_deps','.ninja_log','.tmp')
-$includeExts = @('.exe','.dll','.dat','.ini','.xml','.txt','.json','.lua','.png','.ico','.ttf','.otf','.bin','.cfg','.mo','.qm','.aselibrary','.pal')
+$binDir  = Join-Path $env:GITHUB_WORKSPACE 'build/bin'
+$exePath = Join-Path $binDir 'aseprite.exe'
+$dataDir = Join-Path $binDir 'data'
+if (-not (Test-Path $exePath)) { throw "aseprite.exe not found in build/bin" }
+if (-not (Test-Path $dataDir)) { throw "build/bin/data not found - the copy_data target did not run, the package would not be runnable" }
 
 $stageDir = Join-Path $dist 'stage'
 New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
+Copy-Item $exePath (Join-Path $stageDir 'aseprite.exe') -Force
+Copy-Item $dataDir (Join-Path $stageDir 'data') -Recurse -Force
 
-$all = @(Get-ChildItem $binDir -Recurse -File)
-$skipped = @()
-$kept = @()
-foreach ($f in $all) {
-    $ext = $f.Extension.ToLowerInvariant()
-    if ($excludeExts -contains $ext) { $skipped += $f; continue }
-    if (-not ($includeExts -contains $ext)) { $skipped += $f; continue }
-    $rel = $f.FullName.Substring($binDir.Length).TrimStart([char]92, [char]47)
-    $dest = Join-Path $stageDir $rel
-    $destDir = Split-Path $dest -Parent
-    if ($destDir -and -not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
-    Copy-Item $f.FullName $dest -Force
-    $kept += $dest
-}
-if ($kept.Count -eq 0) { throw "No runtime files were collected from build/bin" }
-if (-not ($kept | Where-Object { (Split-Path $_ -Leaf) -eq 'aseprite.exe' })) {
-    throw "aseprite.exe is missing from the packaged file set"
+# Defensive: drop any stray build artefact that could live inside data/.
+$excludeExts = @('.pdb','.ilk','.exp','.lib','.obj','.iobj','.ipdb','.idb','.res','.tlog','.map','.cache','.tmp')
+$leftovers = @(Get-ChildItem $stageDir -Recurse -File | Where-Object { $excludeExts -contains $_.Extension.ToLowerInvariant() })
+if ($leftovers.Count -gt 0) {
+    Write-Host "Removing $($leftovers.Count) stray build artefact(s) from the staged tree."
+    $leftovers | Remove-Item -Force
 }
 
-Write-Host "Packaged $($kept.Count) runtime file(s); skipped $($skipped.Count) intermediate/build file(s)."
-foreach ($k in $kept) {
-    $rel = $k.Substring($stageDir.Length).TrimStart([char]92, [char]47)
-    Write-Host ("  {0,12:N0}  {1}" -f (Get-Item $k).Length, $rel)
+# Resources the GUI loads from disk at runtime (resource_finder.cpp / skin_theme.cpp).
+$required = @(
+    'data/fonts/fonts.xml',
+    'data/extensions/aseprite-theme/package.json',
+    'data/extensions/aseprite-theme/theme.xml',
+    'data/extensions/aseprite-theme/sheet.png',
+    'data/EULA.txt'
+)
+foreach ($r in $required) {
+    $p = Join-Path $stageDir $r
+    if (-not (Test-Path $p)) { throw "Required runtime resource is missing from the package: $r" }
 }
-if ($skipped.Count -gt 0) {
-    Write-Host "Skipped (first 20):"
-    $skipped | Select-Object -First 20 | ForEach-Object { Write-Host ("  {0,12:N0}  {1}" -f $_.Length, $_.Name) }
+
+$kept = @(Get-ChildItem $stageDir -Recurse -File)
+$keptBytes = ($kept | Measure-Object -Property Length -Sum).Sum
+Write-Host "Packaged $($kept.Count) runtime file(s), $($keptBytes) bytes uncompressed."
+Write-Host "  aseprite.exe : $((Get-Item (Join-Path $stageDir 'aseprite.exe')).Length) bytes"
+Write-Host "  data/ files  : $(($kept | Where-Object { $_.FullName -notlike '*aseprite.exe' }).Count)"
+foreach ($r in $required) { Write-Host "  verified resource: $r" }
+
+# Report what was deliberately NOT shipped (build tools left in bin/).
+$notShipped = @(Get-ChildItem $binDir -File | Where-Object { $_.Name -ne 'aseprite.exe' })
+if ($notShipped.Count -gt 0) {
+    Write-Host "Not shipped (build tools / intermediates in bin/):"
+    $notShipped | ForEach-Object { Write-Host ("  {0,12:N0}  {1}" -f $_.Length, $_.Name) }
 }
 
 # --- zip --------------------------------------------------------------------
 $zipName = 'aseprite-windows-x64.zip'
 $zipPath = Join-Path $dist $zipName
 Compress-Archive -Path (Join-Path $stageDir '*') -DestinationPath $zipPath -CompressionLevel Optimal -Force
+$relPaths = @($kept | ForEach-Object { $_.FullName.Substring($stageDir.Length).TrimStart([char]92, [char]47) })
 Remove-Item $stageDir -Recurse -Force
 
 $zipItem = Get-Item $zipPath
 $zipSha = (Get-FileHash -Algorithm SHA256 -Path $zipPath).Hash.ToLowerInvariant()
 Write-Host ""
-Write-Host "ZIP      : $($zipItem.Name)"
-Write-Host "ZIP size : $($zipItem.Length) bytes ($([math]::Round($zipItem.Length / 1MB, 2)) MB)"
+Write-Host "ZIP       : $($zipItem.Name)"
+Write-Host "ZIP size  : $($zipItem.Length) bytes ($([math]::Round($zipItem.Length / 1MB, 2)) MB)"
 Write-Host "ZIP sha256: $zipSha"
-
 Set-Content -Path (Join-Path $dist 'SHA256SUMS.txt') -Encoding ascii -Value ("$zipSha  $zipName")
 
 # --- manifest ---------------------------------------------------------------
@@ -72,7 +81,7 @@ function Get-EnvInt([string]$name) {
     return 0
 }
 
-$runnerFacts = @{}
+$runnerFacts = [ordered]@{}
 $factsPath = Join-Path $env:GITHUB_WORKSPACE 'runner-facts.json'
 if (Test-Path $factsPath) {
     $obj = Get-Content $factsPath -Raw | ConvertFrom-Json
@@ -85,42 +94,46 @@ if (Test-Path $argsPath) { $cmakeArgsParsed = @(Get-Content $argsPath -Raw | Con
 $releaseTag = 'aseprite-' + $env:ASEPRITE_TAG + '-win64-b' + $env:GITHUB_RUN_NUMBER
 
 $durations = [ordered]@{
-    checkout_source_sec = Get-EnvInt 'DUR_checkout'
-    skia_download_sec   = Get-EnvInt 'DUR_skia'
-    configure_sec       = Get-EnvInt 'DUR_configure'
-    build_sec           = Get-EnvInt 'DUR_build'
-    verify_sec          = Get-EnvInt 'DUR_verify'
-    package_sec         = 0
+    skia_download_sec = Get-EnvInt 'DUR_skia'
+    configure_sec     = Get-EnvInt 'DUR_configure'
+    build_sec         = Get-EnvInt 'DUR_build'
+    verify_sec        = Get-EnvInt 'DUR_verify'
+    package_sec       = 0
 }
 $totalSec = 0
 foreach ($k in @($durations.Keys)) { if ($k -ne 'package_sec') { $totalSec += $durations[$k] } }
 
 $manifest = [ordered]@{
-    schema            = 1
-    artifact          = [ordered]@{
-        name       = $zipName
-        size_bytes = $zipItem.Length
-        sha256     = $zipSha
-        files      = ($kept | ForEach-Object { $_.Substring($stageDir.Length).TrimStart([char]92, [char]47) })
+    schema          = 1
+    artifact        = [ordered]@{
+        name        = $zipName
+        size_bytes  = $zipItem.Length
+        sha256      = $zipSha
+        file_count  = $kept.Count
+        unpacked_bytes = $keptBytes
+        layout      = 'aseprite.exe + data/ at the archive root'
+        files       = $relPaths
     }
-    aseprite          = [ordered]@{
+    aseprite        = [ordered]@{
         version      = $env:APP_VERSION
         version_text = $env:EXE_VERSION_TEXT
         release_tag  = $env:ASEPRITE_TAG
         commit_sha   = $env:ASEPRITE_SHA
+        git_describe = $env:GIT_DESCRIBE
         source       = 'https://github.com/' + $env:ASEPRITE_REPO
-        license_note = 'Aseprite source is distributed under its own EULA; this build is for private use only.'
+        license_note = 'Aseprite source is published under its own EULA; these binaries are for private use only.'
     }
-    dependency_skia   = [ordered]@{
+    dependency_skia = [ordered]@{
         tag                = $env:SKIA_TAG
         source             = 'https://github.com/aseprite/skia/releases/download/' + $env:SKIA_TAG + '/' + $env:SKIA_ASSET
-        resolved_from      = 'laf/misc/skia-tag.txt at laf commit pinned by aseprite ' + $env:ASEPRITE_TAG
+        resolved_from      = 'laf/misc/skia-tag.txt at the laf commit pinned by aseprite ' + $env:ASEPRITE_TAG
         archive_size_bytes = Get-EnvInt 'SKIA_ARCHIVE_SIZE'
         archive_sha256     = $env:SKIA_SHA256
         integrity_verified = $true
         prebuilt_official  = $true
+        compiled_from_source = $false
     }
-    build             = [ordered]@{
+    build           = [ordered]@{
         os            = 'windows'
         arch          = 'x64'
         gui           = $true
@@ -132,24 +145,31 @@ $manifest = [ordered]@{
         parallel_jobs = Get-EnvInt 'BUILD_JOBS'
         cmake_args    = $cmakeArgsParsed
         submodules    = Get-EnvInt 'SUBMODULE_COUNT'
+        static_runtime = $true
     }
-    runner            = $runnerFacts
-    verification      = [ordered]@{
-        pe_machine         = $env:PE_MACHINE
-        arch_x64           = ($env:PE_MACHINE -eq '0x8664')
-        exe_size_bytes     = Get-EnvInt 'EXE_SIZE'
-        exe_sha256         = $env:EXE_SHA256
-        lua_enabled        = ($env:LUA_ENABLED -eq 'True')
-        lua_version        = $env:LUA_VERSION
-        app_api_version    = $env:APP_API_VERSION
-        runtime_file_count = Get-EnvInt 'RUNTIME_FILE_COUNT'
+    runner          = $runnerFacts
+    verification    = [ordered]@{
+        pe_machine          = $env:PE_MACHINE
+        arch_x64            = ($env:PE_MACHINE -eq '0x8664')
+        exe_size_bytes      = Get-EnvInt 'EXE_SIZE'
+        exe_sha256          = $env:EXE_SHA256
+        lua_enabled         = ($env:LUA_ENABLED -eq 'True')
+        lua_version         = $env:LUA_VERSION
+        app_api_version     = $env:APP_API_VERSION
         version_flag_output = $env:EXE_VERSION_TEXT
-        clean_dir_startup  = $true
-        gui_smoke          = $env:GUI_SMOKE
+        clean_dir_startup   = $true
+        gui_smoke           = $env:GUI_SMOKE
+        required_resources  = $required
     }
-    timings           = $durations
-    total_build_sec   = $totalSec
-    github            = [ordered]@{
+    runtime_notes   = [ordered]@{
+        needs_dlls        = $false
+        needs_vc_redist   = $false
+        portable_mode     = 'Drop an empty aseprite.ini next to aseprite.exe to force portable mode (config beside the exe instead of %AppData%).'
+        data_dir_required = 'data/ must stay next to aseprite.exe; the GUI loads fonts and the default theme from it.'
+    }
+    timings         = $durations
+    total_measured_sec = $totalSec
+    github          = [ordered]@{
         workflow    = $env:GITHUB_WORKFLOW
         run_id      = $env:GITHUB_RUN_ID
         run_number  = $env:GITHUB_RUN_NUMBER
@@ -159,12 +179,11 @@ $manifest = [ordered]@{
         run_url     = $env:GITHUB_SERVER_URL + '/' + $env:GITHUB_REPOSITORY + '/actions/runs/' + $env:GITHUB_RUN_ID
         release_tag = $releaseTag
     }
-    generated_at      = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    generated_at    = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 }
 
-$manifestPath = Join-Path $dist 'build-manifest.json'
-$manifest | ConvertTo-Json -Depth 8 | Set-Content -Path $manifestPath -Encoding utf8
-Write-Host "Manifest : $manifestPath"
+$manifest | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $dist 'build-manifest.json') -Encoding utf8
+Write-Host "Manifest  : build-manifest.json"
 
 # --- release notes ----------------------------------------------------------
 $notes = @()
@@ -173,25 +192,32 @@ $notes += ''
 $notes += '| Field | Value |'
 $notes += '| --- | --- |'
 $notes += '| Aseprite version | ' + $env:APP_VERSION + ' |'
-$notes += '| Release tag (source) | ' + $env:ASEPRITE_TAG + ' |'
+$notes += '| Source tag | ' + $env:ASEPRITE_TAG + ' |'
 $notes += '| Source commit SHA | ' + $env:ASEPRITE_SHA + ' |'
-$notes += '| Skia | ' + $env:SKIA_TAG + ' (' + $env:SKIA_ASSET + ') |'
-$notes += '| Build type | ' + $env:BUILD_TYPE + ' / Ninja / MSVC x64 |'
+$notes += '| Skia | ' + $env:SKIA_TAG + ' (' + $env:SKIA_ASSET + ', official prebuilt) |'
+$notes += '| Build type | ' + $env:BUILD_TYPE + ' / Ninja / MSVC x64 / static CRT |'
 $notes += '| Lua scripting | ' + $env:LUA_ENABLED + ' (' + $env:LUA_VERSION + ') |'
 $notes += '| Runner | windows-2025, ' + $env:RUNNER_VCPU + ' vCPU, ' + $env:RUNNER_RAM_GB + ' GB RAM |'
-$notes += '| Build time | ' + $totalSec + ' s (compile step ' + (Get-EnvInt 'DUR_build') + ' s) |'
+$notes += '| Compile step | ' + (Get-EnvInt 'DUR_build') + ' s at --parallel ' + (Get-EnvInt 'BUILD_JOBS') + ' |'
 $notes += '| ZIP size | ' + $zipItem.Length + ' bytes |'
 $notes += '| ZIP SHA-256 | ' + $zipSha + ' |'
+$notes += '| Files in ZIP | ' + $kept.Count + ' |'
 $notes += '| Workflow run | ' + $env:GITHUB_SERVER_URL + '/' + $env:GITHUB_REPOSITORY + '/actions/runs/' + $env:GITHUB_RUN_ID + ' |'
 $notes += ''
-$notes += 'Verified before upload: PE machine 0x8664 (x64), aseprite.exe -b --script executed a Lua probe,'
-$notes += 'and the packaged file set started successfully from an isolated staging directory.'
+$notes += 'Verified before upload: PE machine 0x8664 (x64); `aseprite.exe --version` executed;'
+$notes += '`aseprite.exe -b --script` ran a Lua probe (scripting really compiled in); required runtime'
+$notes += 'resources (fonts, default theme, EULA) present; and the packaged file set started from an'
+$notes += 'isolated staging directory.'
+$notes += ''
+$notes += 'The archive is portable: no DLLs and no VC++ redistributable are needed (Skia is static,'
+$notes += 'the CRT is /MT). Keep `data/` next to `aseprite.exe`.'
 Set-Content -Path (Join-Path $dist 'build-notes.md') -Value ($notes -join [Environment]::NewLine) -Encoding utf8
 
 Add-Content -Path $env:GITHUB_ENV -Value "ZIP_PATH=$zipPath"
 Add-Content -Path $env:GITHUB_ENV -Value "ZIP_SIZE=$($zipItem.Length)"
 Add-Content -Path $env:GITHUB_ENV -Value "ZIP_SHA256=$zipSha"
 Add-Content -Path $env:GITHUB_ENV -Value "RELEASE_TAG=$releaseTag"
+Add-Content -Path $env:GITHUB_ENV -Value "RUNTIME_FILE_COUNT_PACKAGED=$($kept.Count)"
 Add-Content -Path $env:GITHUB_ENV -Value "DUR_package=$([int]((Get-Date) - $t0).TotalSeconds)"
 Write-Host ""
 Write-Host "Packaging complete."

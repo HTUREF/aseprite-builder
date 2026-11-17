@@ -98,18 +98,27 @@ $binDir = Join-Path $env:GITHUB_WORKSPACE 'build/bin'
 $stage = Join-Path $env:GITHUB_WORKSPACE 'stage-clean'
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 
-$packageExts = @('.exe','.dll','.dat','.ini','.xml','.txt','.json','.lua','.png','.ico','.ttf','.otf','.bin','.cfg','.mo','.qm','.aselibrary','.pal')
-$runtimeFiles = @(Get-ChildItem $binDir -Recurse -File | Where-Object { $packageExts -contains $_.Extension.ToLowerInvariant() })
-New-Item -ItemType Directory -Path $stage -Force | Out-Null
-foreach ($f in $runtimeFiles) {
-    $rel = $f.FullName.Substring($binDir.Length).TrimStart([char]92, [char]47)
-    $dest = Join-Path $stage $rel
-    $destDir = Split-Path $dest -Parent
-    if ($destDir -and -not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null }
-    Copy-Item $f.FullName $dest -Force
+# Aseprite does not embed data/: the GUI loads fonts and the default theme from
+# <exe dir>/data at runtime, so the staged set must be aseprite.exe + the data tree.
+$dataDir = Join-Path $binDir 'data'
+if (-not (Test-Path $dataDir)) { throw 'build/bin/data is missing - the GUI could not load fonts or its theme.' }
+$requiredResources = @(
+    'data/fonts/fonts.xml',
+    'data/extensions/aseprite-theme/package.json',
+    'data/extensions/aseprite-theme/theme.xml',
+    'data/extensions/aseprite-theme/sheet.png',
+    'data/EULA.txt'
+)
+foreach ($r in $requiredResources) {
+    if (-not (Test-Path (Join-Path $binDir $r))) { throw "Required runtime resource missing from the build output: $r" }
+    Write-Host "resource OK: $r"
 }
-Write-Host "Staged $($runtimeFiles.Count) runtime file(s) into a clean directory:"
-$runtimeFiles | ForEach-Object { Write-Host ("  {0,12:N0}  {1}" -f $_.Length, $_.Name) }
+
+New-Item -ItemType Directory -Path $stage -Force | Out-Null
+Copy-Item (Join-Path $binDir 'aseprite.exe') (Join-Path $stage 'aseprite.exe') -Force
+Copy-Item $dataDir (Join-Path $stage 'data') -Recurse -Force
+$runtimeFiles = @(Get-ChildItem $stage -Recurse -File)
+Write-Host "Staged $($runtimeFiles.Count) runtime file(s) (aseprite.exe + the whole data/ tree) into a clean directory."
 
 $cleanOut = Join-Path $stage 'startup-report.txt'
 $env:LUA_REPORT = $cleanOut
@@ -132,12 +141,22 @@ Write-Host "Clean-directory startup: PASSED (runs from an isolated directory hol
 # --- GUI smoke launch (informational; headless runners may refuse) ---------
 Write-Host ""
 $guiResult = 'not-attempted'
+$guiOut = Join-Path $env:GITHUB_WORKSPACE 'gui-launch.out.txt'
+$guiErr = Join-Path $env:GITHUB_WORKSPACE 'gui-launch.err.txt'
 try {
-    $p = Start-Process -FilePath (Join-Path $stage 'aseprite.exe') -PassThru -ErrorAction Stop
+    $p = Start-Process -FilePath (Join-Path $stage 'aseprite.exe') -PassThru -RedirectStandardOutput $guiOut -RedirectStandardError $guiErr -ErrorAction Stop
     Start-Sleep -Seconds 12
     if ($p.HasExited) {
         $guiResult = 'process-exited-code-' + $p.ExitCode
-        Write-Host "GUI launch: process exited after the 12s probe -> $guiResult"
+        $guiText = ''
+        foreach ($f in @($guiOut, $guiErr)) { if (Test-Path $f) { $guiText += (Get-Content $f -Raw) } }
+        if ($guiText) { Write-Host "GUI output: $guiText" }
+        # A missing data/ tree shows up here as a resource-loading error; a headless
+        # session shows up as a window/display error and must not fail the build.
+        if ($guiText -match 'not found|No such file|fonts\.xml|theme\.xml|sheet\.png|package\.json') {
+            throw "GUI smoke FAILED: the packaged binary could not load its runtime resources. Output: $guiText"
+        }
+        Write-Host "GUI launch: process exited after the 12s probe -> $guiResult (no missing-resource error)"
     } else {
         $guiResult = 'launched-and-stayed-running'
         Write-Host "GUI launch: process still alive after 12s -> UI initialised"
