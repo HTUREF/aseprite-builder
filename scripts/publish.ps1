@@ -12,9 +12,30 @@ $env:GH_HOST  = 'github.com'
 
 Write-Host "Target repository: $($env:PRIVATE_OUTPUT_REPO.Substring(0,3))... (masked)"
 
+# Runs a native command and returns its merged output without letting stderr abort
+# the script (a native command's stderr merged into the pipeline can raise a
+# terminating NativeCommandError under $ErrorActionPreference = 'Stop').
+function Invoke-Native([string]$Exe, [string[]]$Arguments) {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $code = -1
+    $out = ''
+    try {
+        $out = (& $Exe @Arguments 2>&1 | Out-String).Trim()
+        $code = $LASTEXITCODE
+        if ($null -eq $code) { $code = -1 }
+    } catch {
+        $out = "native invocation error: $_"
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+    return [pscustomobject]@{ Output = $out; ExitCode = $code }
+}
+
 # Fail fast if the credential cannot reach the destination repository.
-$probe = & gh api ("repos/" + $env:PRIVATE_OUTPUT_REPO) --jq '.full_name + " private=" + (.private|tostring)' 2>&1
-if ($LASTEXITCODE -ne 0) { throw "PRIVATE_OUTPUT_TOKEN cannot read the output repository: $probe" }
+$p1 = Invoke-Native -Exe 'gh' -Arguments @('api', ('repos/' + $env:PRIVATE_OUTPUT_REPO), '--jq', '.full_name + " private=" + (.private|tostring)')
+$probe = $p1.Output
+if ($p1.ExitCode -ne 0) { throw "PRIVATE_OUTPUT_TOKEN cannot read the output repository: $probe" }
 Write-Host "Credential check: OK"
 
 $tag = $env:RELEASE_TAG
@@ -27,8 +48,8 @@ $assets = @(
 foreach ($a in $assets) { if (-not (Test-Path $a)) { throw "Missing asset: $a" } }
 
 # Refuse to overwrite an existing release: every build gets its own tag.
-& gh release view $tag --repo $env:PRIVATE_OUTPUT_REPO --json tagName 2>&1 | Out-Null
-if ($LASTEXITCODE -eq 0) { throw "Release $tag already exists - refusing to overwrite." }
+$existing = Invoke-Native -Exe 'gh' -Arguments @('release', 'view', $tag, '--repo', $env:PRIVATE_OUTPUT_REPO, '--json', 'tagName')
+if ($existing.ExitCode -eq 0) { throw "Release $tag already exists - refusing to overwrite." }
 
 Write-Host "Creating private release $tag"
 $attempt = 0
@@ -42,8 +63,9 @@ while ($attempt -lt 3 -and -not $ok) {
 if (-not $ok) { throw 'gh release create failed after 3 attempts.' }
 
 # Verify what actually landed in the private release.
-$view = & gh release view $tag --repo $env:PRIVATE_OUTPUT_REPO --json tagName,url,assets
-if ($LASTEXITCODE -ne 0) { throw 'Could not read back the created release.' }
+$pv = Invoke-Native -Exe 'gh' -Arguments @('release', 'view', $tag, '--repo', $env:PRIVATE_OUTPUT_REPO, '--json', 'tagName,url,assets')
+$view = $pv.Output
+if ($pv.ExitCode -ne 0) { throw "Could not read back the created release: $view" }
 Write-Host "Release JSON: $view"
 
 $rel = $view | ConvertFrom-Json
