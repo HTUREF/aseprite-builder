@@ -12,6 +12,10 @@ on:
         description: "Publish the verified ZIP + manifest to the private output repository"
         type: boolean
         default: true
+      skip_credential_probe:
+        description: "Skip the pre-build output-credential probe (use when the token is being fixed)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -48,7 +52,7 @@ jobs:
 
       # ------------------------------------------------------------------ 02b
       - name: "02b Validate output credentials (fail fast, before compiling)"
-        if: ${{ inputs.publish }}
+        if: "${{ inputs.publish && !inputs.skip_credential_probe }}"
         shell: pwsh
         env:
           PRIVATE_OUTPUT_TOKEN: ${{ secrets.PRIVATE_OUTPUT_TOKEN }}
