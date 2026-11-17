@@ -1,0 +1,12 @@
+# Build outputs must never be committed from this repository.
+/dist/
+/build/
+/stage-clean/
+/skia/
+/src-aseprite/
+/tmp/
+*.zip
+*.exe
+runner-facts.json
+cmake-args.json
+lua-report.txt
