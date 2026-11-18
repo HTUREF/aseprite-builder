@@ -61,6 +61,22 @@ try {
     else { Fail "Architecture is $machineHex, expected x64 (0x8664)" }
 } catch { Fail "Could not read the PE header: $_" }
 
+# --- 2b. no hidden runtime dependencies -------------------------------------
+# A runtime smoke test is not enough: the runner image happens to carry OpenSSL, so a
+# binary importing libcrypto-3-x64.dll starts fine here and dies on a clean machine.
+# The PE import directory is environment independent, so it is checked instead.
+. ./scripts/check-imports.ps1
+$importResult = Test-PeImports -ExePath $exe
+Write-Host "Imported DLLs ($($importResult.Imports.Count)): $($importResult.Imports -join ', ')"
+if ($importResult.Problems.Count -gt 0) {
+    foreach ($problem in $importResult.Problems) {
+        Fail "Hidden runtime dependency - the exe would need a DLL that is not part of Windows: $problem"
+    }
+} else {
+    Ok 'Every imported DLL ships with Windows (nothing like libcrypto/libssl/vcruntime to bundle)'
+}
+Add-Content -Path $env:GITHUB_ENV -Value ("IMPORTED_DLLS=" + ($importResult.Imports -join ','))
+
 # --- 3. --version and --help -------------------------------------------------
 $versionText = ''
 $r = Invoke-Native -Exe $exe -Arguments @('--version')

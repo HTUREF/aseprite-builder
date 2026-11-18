@@ -26,6 +26,12 @@ $cmakeArgs = @(
     '-DENABLE_TESTS=OFF'
     '-DENABLE_SCRIPTING=ON'
     '-DENABLE_CCACHE=OFF'
+    # libarchive (third_party) defaults ENABLE_OPENSSL=ON. Combined with Aseprite
+    # forcing ENABLE_CNG=OFF, that makes libarchive link the system OpenSSL, which
+    # turns into a hidden runtime dependency on libcrypto-3-x64.dll. Turning it off
+    # keeps every bundled third-party library static and the exe self-contained.
+    '-DENABLE_OPENSSL=OFF'
+    '-DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON'
     '-DLAF_BACKEND=skia'
     "-DSKIA_DIR=$skia"
     "-DSKIA_LIBRARY_DIR=$skiaLib"
@@ -45,6 +51,7 @@ $expect = [ordered]@{
     'ENABLE_SCRIPTING:BOOL'   = 'ON'
     'ENABLE_TESTS:BOOL'       = 'OFF'
     'LAF_BACKEND:STRING'      = 'skia'
+    'ENABLE_OPENSSL:BOOL'     = 'OFF'
     'CMAKE_BUILD_TYPE:STRING' = $env:BUILD_TYPE
 }
 foreach ($k in $expect.Keys) {

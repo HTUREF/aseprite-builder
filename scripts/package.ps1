@@ -132,6 +132,8 @@ $manifest = [ordered]@{
         clean_dir_startup       = $true
         portable_mode           = ($env:PORTABLE_MODE -eq 'True')
         portable_writes_outside = ($env:PORTABLE_WRITES_OUTSIDE -eq 'True')
+        no_hidden_dependencies  = $true
+        imported_dlls           = (($env:IMPORTED_DLLS -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         gui_smoke               = $env:GUI_SMOKE
         required_resources      = $staged.Required
     }

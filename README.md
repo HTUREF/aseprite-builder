@@ -95,3 +95,16 @@ The private release contains:
 
 Aseprite source is published under its own EULA. Compiled binaries are private, are not
 uploaded to this public repository, and are not redistributed.
+
+## No hidden DLL dependencies
+
+Verification reads the PE import directory of the built exe and fails the build unless every
+imported DLL ships with Windows itself. This is not paranoia: a runtime smoke test is not
+enough, because the runner image carries OpenSSL on PATH, so a binary importing
+`libcrypto-3-x64.dll` starts fine in CI and then dies on a clean machine with
+"libcrypto-3-x64.dll was not found".
+
+The cause was `third_party/CMakeLists.txt`, which sets libarchive's `ENABLE_CNG=OFF` while
+libarchive defaults `ENABLE_OPENSSL=ON`, so CMake linked whichever OpenSSL the runner had.
+The fix passes `-DENABLE_OPENSSL=OFF` and `-DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON`;
+`ENABLE_OPENSSL:BOOL=OFF` is asserted from `CMakeCache.txt` after configuring.
