@@ -136,29 +136,31 @@ if (Test-Path $luaOut) {
 if ($luaEnabled) { Ok "Lua scripting executed (interpreter $luaVersion, app.version $appVersion, apiVersion $appApiVersion)" }
 else { Fail "Lua scripting could not be proven: -b --script produced no valid lua-report.txt. Output: $luaStdout" }
 
-# --- 6. clean staging directory startup ------------------------------------
+# --- 6. packaged file set + isolated-directory startup ---------------------
 Write-Host ""
+. ./scripts/stage-runtime.ps1
 $stage = Join-Path $env:GITHUB_WORKSPACE 'stage-clean'
-if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
-New-Item -ItemType Directory -Path $stage -Force | Out-Null
-Copy-Item $exe (Join-Path $stage 'aseprite.exe') -Force
-if (Test-Path $dataDir) { Copy-Item $dataDir (Join-Path $stage 'data') -Recurse -Force }
-$staged = @(Get-ChildItem $stage -Recurse -File)
-Write-Host "Staged $($staged.Count) runtime file(s) (aseprite.exe + data/) into an isolated directory."
+$stageSet = New-RuntimeStage -Destination $stage
+Write-Host "Staged $($stageSet.Files.Count) runtime file(s) with the shared stage builder (exe + aseprite.ini + aseprite.ico + data/)."
+Write-Host "  aseprite.ini : $((Get-Item (Join-Path $stage 'aseprite.ini')).Length) bytes -> App::isPortable() is now true"
+Write-Host "  aseprite.ico : $((Get-Item (Join-Path $stage 'aseprite.ico')).Length) bytes"
 
-$cleanUser = Join-Path $env:GITHUB_WORKSPACE 'aseprite-user-clean'
-if (Test-Path $cleanUser) { Remove-Item $cleanUser -Recurse -Force }
-New-Item -ItemType Directory -Path $cleanUser -Force | Out-Null
-$env:ASEPRITE_USER_FOLDER = $cleanUser
+# Baseline of the per-user config folder so any file it gains is attributable.
+$appDataDir = Join-Path $env:APPDATA 'Aseprite'
+$appDataBefore = @()
+if (Test-Path $appDataDir) { $appDataBefore = @(Get-ChildItem $appDataDir -Recurse -File | ForEach-Object { $_.FullName }) }
+
+# ASEPRITE_USER_FOLDER would bypass portable mode, so clear it for these runs.
+$env:ASEPRITE_USER_FOLDER = $null
 Push-Location $stage
 try {
     $rc = Invoke-Native -Exe (Join-Path $stage 'aseprite.exe') -Arguments @('-b', '--version')
     $cleanStdout = $rc.Output
     $cleanExit = $rc.ExitCode
 } finally { Pop-Location }
-Write-Host "Clean-directory 'aseprite.exe -b --version' -> exit $cleanExit, output '$cleanStdout'"
+Write-Host "Isolated-directory 'aseprite.exe -b --version' -> exit $cleanExit, output '$cleanStdout'"
 if ($cleanExit -eq 0 -and $cleanStdout -match 'Aseprite') { Ok 'Binary starts from an isolated directory holding only the packaged files' }
-else { Fail "Clean-directory startup failed (exit $cleanExit, output '$cleanStdout') - a runtime dependency is missing" }
+else { Fail "Isolated-directory startup failed (exit $cleanExit, output '$cleanStdout') - a runtime dependency is missing" }
 
 # --- 7. GUI smoke: proves fonts and the default theme really load ----------
 Write-Host ""
@@ -187,6 +189,32 @@ try {
     $guiResult = 'blocked-by-session'
     Write-Host "GUI launch not possible in this session: $_"
 }
+# --- 6b. portable mode must not write outside the application folder ------
+# Checked after both the batch run and the GUI run, because preferences are
+# normally written on exit.
+Write-Host ""
+$appDataNew = @()
+if (Test-Path $appDataDir) {
+    $appDataNew = @(Get-ChildItem $appDataDir -Recurse -File | ForEach-Object { $_.FullName } |
+        Where-Object { $appDataBefore -notcontains $_ })
+}
+$portableWritesOutside = ($appDataNew.Count -gt 0)
+if ($portableWritesOutside) {
+    Fail ("Portable mode wrote outside the application folder: " + ($appDataNew -join ', '))
+} else {
+    Ok 'Portable mode: no file written to %APPDATA%Aseprite'
+}
+$userFilesInside = @(Get-ChildItem $stage -File |
+    Where-Object { $_.Name -notin @('aseprite.exe', 'aseprite.ini', 'aseprite.ico') } |
+    ForEach-Object { $_.Name })
+if ($userFilesInside.Count -gt 0) {
+    Ok ('Portable mode: user files kept inside the app folder: ' + ($userFilesInside -join ', '))
+} else {
+    Write-Host 'note: no user files were created in the app folder (the first GUI run creates them)'
+}
+Add-Content -Path $env:GITHUB_ENV -Value "PORTABLE_MODE=True"
+Add-Content -Path $env:GITHUB_ENV -Value "PORTABLE_WRITES_OUTSIDE=$portableWritesOutside"
+
 Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 
 # --- summary ---------------------------------------------------------------

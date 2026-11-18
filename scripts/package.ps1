@@ -1,67 +1,31 @@
-# 10 Packages the real runtime file set: aseprite.exe + the whole build/bin/data tree.
-#    Aseprite does NOT embed data/ into the exe - src/CMakeLists.txt copies the data
-#    tree to build/bin/data through the copy_data target, and src/app/resource_finder.cpp
-#    loads fonts/, extensions/aseprite-theme/ etc. from <exe dir>/data at runtime.
-#    Shipping only the exe produces a binary that cannot show its UI.
+# 10 Packages the runtime file set through the shared stage builder:
+#    aseprite.exe + the whole build/bin/data tree + aseprite.ini (portable mode marker)
+#    + aseprite.ico. Aseprite does NOT embed data/ into the exe.
 $ErrorActionPreference = 'Stop'
 $t0 = Get-Date
 Set-Location $env:GITHUB_WORKSPACE
+. ./scripts/stage-runtime.ps1
 
 $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
 if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
 New-Item -ItemType Directory -Path $dist -Force | Out-Null
 
-$binDir  = Join-Path $env:GITHUB_WORKSPACE 'build/bin'
-$exePath = Join-Path $binDir 'aseprite.exe'
-$dataDir = Join-Path $binDir 'data'
-if (-not (Test-Path $exePath)) { throw "aseprite.exe not found in build/bin" }
-if (-not (Test-Path $dataDir)) { throw "build/bin/data not found - the copy_data target did not run, the package would not be runnable" }
-
 $stageDir = Join-Path $dist 'stage'
-New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
-Copy-Item $exePath (Join-Path $stageDir 'aseprite.exe') -Force
-Copy-Item $dataDir (Join-Path $stageDir 'data') -Recurse -Force
-
-# Defensive: drop any stray build artefact that could live inside data/.
-$excludeExts = @('.pdb','.ilk','.exp','.lib','.obj','.iobj','.ipdb','.idb','.res','.tlog','.map','.cache','.tmp')
-$leftovers = @(Get-ChildItem $stageDir -Recurse -File | Where-Object { $excludeExts -contains $_.Extension.ToLowerInvariant() })
-if ($leftovers.Count -gt 0) {
-    Write-Host "Removing $($leftovers.Count) stray build artefact(s) from the staged tree."
-    $leftovers | Remove-Item -Force
-}
-
-# Resources the GUI loads from disk at runtime (resource_finder.cpp / skin_theme.cpp).
-$required = @(
-    'data/fonts/fonts.xml',
-    'data/extensions/aseprite-theme/package.json',
-    'data/extensions/aseprite-theme/theme.xml',
-    'data/extensions/aseprite-theme/sheet.png',
-    'data/EULA.txt'
-)
-foreach ($r in $required) {
-    $p = Join-Path $stageDir $r
-    if (-not (Test-Path $p)) { throw "Required runtime resource is missing from the package: $r" }
-}
-
-$kept = @(Get-ChildItem $stageDir -Recurse -File)
+$staged = New-RuntimeStage -Destination $stageDir
+$kept = $staged.Files
 $keptBytes = ($kept | Measure-Object -Property Length -Sum).Sum
-Write-Host "Packaged $($kept.Count) runtime file(s), $($keptBytes) bytes uncompressed."
-Write-Host "  aseprite.exe : $((Get-Item (Join-Path $stageDir 'aseprite.exe')).Length) bytes"
-Write-Host "  data/ files  : $(($kept | Where-Object { $_.FullName -notlike '*aseprite.exe' }).Count)"
-foreach ($r in $required) { Write-Host "  verified resource: $r" }
 
-# Report what was deliberately NOT shipped (build tools left in bin/).
-$notShipped = @(Get-ChildItem $binDir -File | Where-Object { $_.Name -ne 'aseprite.exe' })
-if ($notShipped.Count -gt 0) {
-    Write-Host "Not shipped (build tools / intermediates in bin/):"
-    $notShipped | ForEach-Object { Write-Host ("  {0,12:N0}  {1}" -f $_.Length, $_.Name) }
-}
+$relPaths = @($kept | ForEach-Object { $_.FullName.Substring($stageDir.Length).TrimStart([char]92, [char]47) })
+Write-Host "Packaged $($kept.Count) runtime file(s), $keptBytes bytes uncompressed."
+Write-Host "  aseprite.exe : $((Get-Item (Join-Path $stageDir 'aseprite.exe')).Length) bytes"
+Write-Host "  aseprite.ini : $((Get-Item (Join-Path $stageDir 'aseprite.ini')).Length) bytes (portable mode marker)"
+Write-Host "  aseprite.ico : $((Get-Item (Join-Path $stageDir 'aseprite.ico')).Length) bytes (official app icon)"
+foreach ($r in $staged.Required) { Write-Host "  verified: $r" }
 
 # --- zip --------------------------------------------------------------------
 $zipName = 'aseprite-windows-x64.zip'
 $zipPath = Join-Path $dist $zipName
 Compress-Archive -Path (Join-Path $stageDir '*') -DestinationPath $zipPath -CompressionLevel Optimal -Force
-$relPaths = @($kept | ForEach-Object { $_.FullName.Substring($stageDir.Length).TrimStart([char]92, [char]47) })
 Remove-Item $stageDir -Recurse -Force
 
 $zipItem = Get-Item $zipPath
@@ -106,13 +70,13 @@ foreach ($k in @($durations.Keys)) { if ($k -ne 'package_sec') { $totalSec += $d
 $manifest = [ordered]@{
     schema          = 1
     artifact        = [ordered]@{
-        name        = $zipName
-        size_bytes  = $zipItem.Length
-        sha256      = $zipSha
-        file_count  = $kept.Count
+        name           = $zipName
+        size_bytes     = $zipItem.Length
+        sha256         = $zipSha
+        file_count     = $kept.Count
         unpacked_bytes = $keptBytes
-        layout      = 'aseprite.exe + data/ at the archive root'
-        files       = $relPaths
+        layout         = 'aseprite.exe + aseprite.ini + aseprite.ico + data/ at the archive root'
+        files          = $relPaths
     }
     aseprite        = [ordered]@{
         version      = $env:APP_VERSION
@@ -123,49 +87,60 @@ $manifest = [ordered]@{
         source       = 'https://github.com/' + $env:ASEPRITE_REPO
         license_note = 'Aseprite source is published under its own EULA; these binaries are for private use only.'
     }
+    icon            = [ordered]@{
+        file            = 'aseprite.ico'
+        sizes           = @('16','20','24','28','32','48','64','128','256')
+        source          = 'data/icons/ase.ico at the pinned Aseprite commit (official asset)'
+        embedded_in_exe = $true
+        embedded_as     = 'ICON resource 0 from src/main/win/resources_win32.rc'
+        other_icons     = 'data/icons/doc.ico and data/icons/ext.ico ship alongside for file associations'
+    }
     dependency_skia = [ordered]@{
-        tag                = $env:SKIA_TAG
-        source             = 'https://github.com/aseprite/skia/releases/download/' + $env:SKIA_TAG + '/' + $env:SKIA_ASSET
-        resolved_from      = 'laf/misc/skia-tag.txt at the laf commit pinned by aseprite ' + $env:ASEPRITE_TAG
-        archive_size_bytes = Get-EnvInt 'SKIA_ARCHIVE_SIZE'
-        archive_sha256     = $env:SKIA_SHA256
-        integrity_verified = $true
-        prebuilt_official  = $true
+        tag                  = $env:SKIA_TAG
+        source               = 'https://github.com/aseprite/skia/releases/download/' + $env:SKIA_TAG + '/' + $env:SKIA_ASSET
+        resolved_from        = 'laf/misc/skia-tag.txt at the laf commit pinned by aseprite ' + $env:ASEPRITE_TAG
+        archive_size_bytes   = Get-EnvInt 'SKIA_ARCHIVE_SIZE'
+        archive_sha256       = $env:SKIA_SHA256
+        integrity_verified   = $true
+        prebuilt_official    = $true
         compiled_from_source = $false
     }
     build           = [ordered]@{
-        os            = 'windows'
-        arch          = 'x64'
-        gui           = $true
-        backend       = 'skia'
-        scripting     = 'lua'
-        build_type    = $env:BUILD_TYPE
-        generator     = 'Ninja'
-        compiler      = $env:CL_BANNER
-        parallel_jobs = Get-EnvInt 'BUILD_JOBS'
-        cmake_args    = $cmakeArgsParsed
-        submodules    = Get-EnvInt 'SUBMODULE_COUNT'
+        os             = 'windows'
+        arch           = 'x64'
+        gui            = $true
+        backend        = 'skia'
+        scripting      = 'lua'
+        build_type     = $env:BUILD_TYPE
+        generator      = 'Ninja'
+        compiler       = $env:CL_BANNER
+        parallel_jobs  = Get-EnvInt 'BUILD_JOBS'
+        cmake_args     = $cmakeArgsParsed
+        submodules     = Get-EnvInt 'SUBMODULE_COUNT'
         static_runtime = $true
     }
     runner          = $runnerFacts
     verification    = [ordered]@{
-        pe_machine          = $env:PE_MACHINE
-        arch_x64            = ($env:PE_MACHINE -eq '0x8664')
-        exe_size_bytes      = Get-EnvInt 'EXE_SIZE'
-        exe_sha256          = $env:EXE_SHA256
-        lua_enabled         = ($env:LUA_ENABLED -eq 'True')
-        lua_version         = $env:LUA_VERSION
-        app_api_version     = $env:APP_API_VERSION
-        version_flag_output = $env:EXE_VERSION_TEXT
-        clean_dir_startup   = $true
-        gui_smoke           = $env:GUI_SMOKE
-        required_resources  = $required
+        pe_machine              = $env:PE_MACHINE
+        arch_x64                = ($env:PE_MACHINE -eq '0x8664')
+        exe_size_bytes          = Get-EnvInt 'EXE_SIZE'
+        exe_sha256              = $env:EXE_SHA256
+        lua_enabled             = ($env:LUA_ENABLED -eq 'True')
+        lua_version             = $env:LUA_VERSION
+        app_api_version         = $env:APP_API_VERSION
+        version_flag_output     = $env:EXE_VERSION_TEXT
+        clean_dir_startup       = $true
+        portable_mode           = ($env:PORTABLE_MODE -eq 'True')
+        portable_writes_outside = ($env:PORTABLE_WRITES_OUTSIDE -eq 'True')
+        gui_smoke               = $env:GUI_SMOKE
+        required_resources      = $staged.Required
     }
     runtime_notes   = [ordered]@{
         needs_dlls        = $false
         needs_vc_redist   = $false
-        portable_mode     = 'Drop an empty aseprite.ini next to aseprite.exe to force portable mode (config beside the exe instead of %AppData%).'
-        data_dir_required = 'data/ must stay next to aseprite.exe; the GUI loads fonts and the default theme from it.'
+        portable_mode     = 'ON by default. The shipped aseprite.ini beside the exe makes App::isPortable() true, so the user folder (aseprite.ini, Aseprite.log, user.aseprite-brushes, palettes/) lives inside the application directory and nothing is written to %APPDATA%. Delete aseprite.ini to fall back to per-user configuration.'
+        data_dir_required = 'data/ must stay next to aseprite.exe; the GUI loads fonts and its default theme from there.'
+        writable_location = 'Settings live beside the executable, so keep the folder in a writable location (not under Program Files).'
     }
     timings         = $durations
     total_measured_sec = $totalSec
@@ -202,15 +177,16 @@ $notes += '| Compile step | ' + (Get-EnvInt 'DUR_build') + ' s at --parallel ' +
 $notes += '| ZIP size | ' + $zipItem.Length + ' bytes |'
 $notes += '| ZIP SHA-256 | ' + $zipSha + ' |'
 $notes += '| Files in ZIP | ' + $kept.Count + ' |'
+$notes += '| Portable mode | ' + $env:PORTABLE_MODE + ' - ships aseprite.ini, writes only inside its own folder |'
+$notes += '| Icon | aseprite.ico, 9 sizes up to 256x256; also embedded in aseprite.exe |'
 $notes += '| Workflow run | ' + $env:GITHUB_SERVER_URL + '/' + $env:GITHUB_REPOSITORY + '/actions/runs/' + $env:GITHUB_RUN_ID + ' |'
 $notes += ''
-$notes += 'Verified before upload: PE machine 0x8664 (x64); `aseprite.exe --version` executed;'
-$notes += '`aseprite.exe -b --script` ran a Lua probe (scripting really compiled in); required runtime'
-$notes += 'resources (fonts, default theme, EULA) present; and the packaged file set started from an'
-$notes += 'isolated staging directory.'
+$notes += 'Verified before upload: PE machine 0x8664 (x64); ' + [char]96 + 'aseprite.exe --version' + [char]96 + ' executed;'
+$notes += [char]96 + 'aseprite.exe -b --script' + [char]96 + ' ran a Lua probe; required runtime resources present; the packaged'
+$notes += 'set started from an isolated directory; and running it produced no files outside that'
+$notes += 'directory (portable mode, no %APPDATA% writes).'
 $notes += ''
-$notes += 'The archive is portable: no DLLs and no VC++ redistributable are needed (Skia is static,'
-$notes += 'the CRT is /MT). Keep `data/` next to `aseprite.exe`.'
+$notes += 'No DLLs and no VC++ redistributable are needed (Skia is static, CRT is /MT).'
 Set-Content -Path (Join-Path $dist 'build-notes.md') -Value ($notes -join [Environment]::NewLine) -Encoding utf8
 
 Add-Content -Path $env:GITHUB_ENV -Value "ZIP_PATH=$zipPath"

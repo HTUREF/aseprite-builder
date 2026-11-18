@@ -64,6 +64,27 @@ gh run watch --repo <owner>/aseprite-builder
 
 ## Output
 
+The archive root contains `aseprite.exe`, `aseprite.ini`, `aseprite.ico` and the whole `data/`
+tree. Two packaging details matter:
+
+**Portable mode is ON by default.** `aseprite.ini` sitting next to the executable makes
+`App::isPortable()` true (`src/app/app.cpp`), which moves the user folder into the
+application directory. Measured behaviour:
+
+| Shipped files | Where Aseprite writes |
+| --- | --- |
+| without `aseprite.ini` | creates and uses `%APPDATA%\Aseprite` |
+| **with `aseprite.ini` (what we ship)** | only `aseprite.ini`, `Aseprite.log`, `user.aseprite-brushes`, `palettes\` **inside its own folder** |
+
+The verification step asserts this: it runs the packaged binary and fails the build if
+anything appears under `%APPDATA%\Aseprite`. Keep the folder somewhere writable (not under
+Program Files). Delete `aseprite.ini` to get the normal per-user configuration instead.
+
+**The icon** is the official Aseprite asset: `aseprite.ico` at the archive root (9 sizes,
+16x16 to 256x256, taken from `data/icons/ase.ico` at the pinned commit) and the same icon
+is embedded in `aseprite.exe` as ICON resource 0. `data/icons/doc.ico` and
+`data/icons/ext.ico` ship alongside for file associations.
+
 The private release contains:
 
 - `aseprite-windows-x64.zip` - the complete portable runtime file set
